@@ -25,8 +25,8 @@ static int currentSpeedLevel = 1;
 static bool fanEnabled = false;
 
 // ТВОЙ MOSFET: включение = LOW, выключение = HIGH
-static const int FAN_ON_LEVEL  = HIGH;
-static const int FAN_OFF_LEVEL = LOW;
+static const int FAN_ON_LEVEL  = LOW;
+static const int FAN_OFF_LEVEL = HIGH;
 
 static const int POWER_SW_ACTIVE_LEVEL = HIGH;
 static const int POWER_SW_IDLE_LEVEL   = LOW;
@@ -223,7 +223,7 @@ void setup() {
 
   // Старт: минимальная скорость, кулер выключен
   applySpeedLevel(1);
-  applyFanPower(false);
+  applyFanPower(true);
 
   connectWifi();
 

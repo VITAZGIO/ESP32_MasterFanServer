@@ -89,7 +89,8 @@ static const char* T_FAN1_SPEED_STATE = "serverfan/fan1/speed/state";
 static const char* T_FAN2_SPEED_SET   = "serverfan/fan2/speed/set";
 static const char* T_FAN2_SPEED_STATE = "serverfan/fan2/speed/state";
 
-static const char* T_FAN_PWM_STATE = "serverfan/fan/pwm/state";   // pwm кулера 1 (для совместимости)
+static const char* T_FAN1_PWM_STATE = "serverfan/fan1/pwm/state";
+static const char* T_FAN2_PWM_STATE = "serverfan/fan2/pwm/state";
 
 // обороты
 static const char* T_FAN1_RPM_STATE = "serverfan/fan1/rpm/state";
@@ -280,8 +281,10 @@ static void publishState() {
   snprintf(buf, sizeof(buf), "%d", speedLevel2);
   mqtt.publish(T_FAN2_SPEED_STATE, buf, true);
 
-  snprintf(buf, sizeof(buf), "%d", FAN_SPEED_PWM[speedLevel1 - 1]);
-  mqtt.publish(T_FAN_PWM_STATE, buf, true);
+  snprintf(buf, sizeof(buf), "%d", levelToPwm1(speedLevel1));
+  mqtt.publish(T_FAN1_PWM_STATE, buf, true);
+  snprintf(buf, sizeof(buf), "%d", levelToPwm2(speedLevel2));
+  mqtt.publish(T_FAN2_PWM_STATE, buf, true);
 
   snprintf(buf, sizeof(buf), "%d", currentRpm1);
   mqtt.publish(T_FAN1_RPM_STATE, buf, true);

@@ -75,6 +75,7 @@ static const int SERVER_ON_LEVEL = HIGH;
 
 // ---------------- ТОПИКИ ----------------
 static const char* T_STATUS = "serverfan/status";
+static const char* T_RSSI   = "serverfan/rssi";
 
 static const char* T_FAN_POWER_SET   = "serverfan/fan/power/set";
 static const char* T_FAN_POWER_STATE = "serverfan/fan/power/state";
@@ -223,7 +224,7 @@ static uint8_t levelToPwm2(int level) {
 
 static void applySpeed1(int level) {
   speedLevel1 = constrain(level, 1, 10);
-  ledcWrite(PWM1_CHANNEL, levelToPwm1(speedLevel1));
+  ledcWrite(FAN1_PWM_PIN, levelToPwm1(speedLevel1));
   Serial.print("[FAN1] Уровень = ");
   Serial.print(speedLevel1);
   Serial.print("/10 | PWM = ");
@@ -233,7 +234,7 @@ static void applySpeed1(int level) {
 
 static void applySpeed2(int level) {
   speedLevel2 = constrain(level, 1, 10);
-  ledcWrite(PWM2_CHANNEL, levelToPwm2(speedLevel2));
+  ledcWrite(FAN2_PWM_PIN, levelToPwm2(speedLevel2));
   Serial.print("[FAN2] Уровень = ");
   Serial.print(speedLevel2);
   Serial.print("/10 | PWM = ");
@@ -248,8 +249,8 @@ static void applySpeedBoth(int level) {
   Serial.println(level);
   speedLevel1 = level;
   speedLevel2 = level;
-  ledcWrite(PWM1_CHANNEL, levelToPwm1(level));
-  ledcWrite(PWM2_CHANNEL, levelToPwm2(level));
+  ledcWrite(FAN1_PWM_PIN, levelToPwm1(level));
+  ledcWrite(FAN2_PWM_PIN, levelToPwm2(level));
   publishState();
 }
 
@@ -297,6 +298,162 @@ static void publishState() {
   mqtt.publish(T_TEMP_HDD_STATE, buf, true);
 
   mqtt.publish(T_SERVER_STATE, serverOn ? "ON" : "OFF", true);
+
+  mqtt.publish(T_RSSI, String(WiFi.RSSI()).c_str(), true);
+}
+
+// ============================================================
+//  MQTT DISCOVERY
+// ============================================================
+// Все сущности объединены в одно устройство HA через общий
+// device.identifiers. Availability переиспользует уже существующий
+// LWT-топик T_STATUS (online/offline), отдельный топик не нужен.
+
+static bool discoverySent = false;
+
+static String uidBase() {
+  String uid = "serverfan_";
+  uid += String((uint32_t)ESP.getEfuseMac(), HEX);
+  return uid;
+}
+
+static String deviceBlockJson() {
+  String d = "\"device\":{";
+  d += "\"identifiers\":[\"" + uidBase() + "\"],";
+  d += "\"name\":\"ESP32 сервер\",";
+  d += "\"manufacturer\":\"VITAZGIO\",";
+  d += "\"model\":\"ESP32-C3\",";
+  d += "\"sw_version\":\"ESP32_MasterFanServer\"";
+  d += "}";
+  return d;
+}
+
+static void publishDiscoveryConfig(const char* component, const char* objectId, const String& payload) {
+  char topic[96];
+  snprintf(topic, sizeof(topic), "homeassistant/%s/serverfan/%s/config", component, objectId);
+  mqtt.publish(topic, payload.c_str(), true); // retain
+}
+
+// sensor: температура HDD
+static void discoverHddTemp() {
+  String p = "{";
+  p += "\"name\":\"Температура HDD\",";
+  p += "\"unique_id\":\"" + uidBase() + "_hdd_temp\",";
+  p += "\"state_topic\":\"" + String(T_TEMP_HDD_STATE) + "\",";
+  p += "\"unit_of_measurement\":\"°C\",";
+  p += "\"device_class\":\"temperature\",";
+  p += "\"state_class\":\"measurement\",";
+  p += "\"availability_topic\":\"" + String(T_STATUS) + "\",";
+  p += deviceBlockJson();
+  p += "}";
+  publishDiscoveryConfig("sensor", "hdd_temp", p);
+}
+
+// sensor: обороты (кулер1 / кулер2 / CPU-кулер)
+static void discoverRpm(const char* objectId, const char* name, const char* stateTopic) {
+  String p = "{";
+  p += "\"name\":\"" + String(name) + "\",";
+  p += "\"unique_id\":\"" + uidBase() + "_" + String(objectId) + "\",";
+  p += "\"state_topic\":\"" + String(stateTopic) + "\",";
+  p += "\"unit_of_measurement\":\"rpm\",";
+  p += "\"icon\":\"mdi:fan\",";
+  p += "\"state_class\":\"measurement\",";
+  p += "\"availability_topic\":\"" + String(T_STATUS) + "\",";
+  p += deviceBlockJson();
+  p += "}";
+  publishDiscoveryConfig("sensor", objectId, p);
+}
+
+// binary_sensor: статус сервера (по Power LED)
+static void discoverServerState() {
+  String p = "{";
+  p += "\"name\":\"Сервер включен\",";
+  p += "\"unique_id\":\"" + uidBase() + "_server_state\",";
+  p += "\"state_topic\":\"" + String(T_SERVER_STATE) + "\",";
+  p += "\"payload_on\":\"ON\",\"payload_off\":\"OFF\",";
+  p += "\"device_class\":\"power\",";
+  p += "\"availability_topic\":\"" + String(T_STATUS) + "\",";
+  p += deviceBlockJson();
+  p += "}";
+  publishDiscoveryConfig("binary_sensor", "server_state", p);
+}
+
+// switch: питание кулеров (MOSFET)
+static void discoverFanPower() {
+  String p = "{";
+  p += "\"name\":\"Питание кулеров\",";
+  p += "\"unique_id\":\"" + uidBase() + "_fan_power\",";
+  p += "\"command_topic\":\"" + String(T_FAN_POWER_SET) + "\",";
+  p += "\"state_topic\":\"" + String(T_FAN_POWER_STATE) + "\",";
+  p += "\"payload_on\":\"ON\",\"payload_off\":\"OFF\",";
+  p += "\"icon\":\"mdi:fan\",";
+  p += "\"availability_topic\":\"" + String(T_STATUS) + "\",";
+  p += deviceBlockJson();
+  p += "}";
+  publishDiscoveryConfig("switch", "fan_power", p);
+}
+
+// number: скорость кулера (общая / кулер1 / кулер2), 1..10
+static void discoverFanSpeed(const char* objectId, const char* name, const char* setTopic, const char* stateTopic) {
+  String p = "{";
+  p += "\"name\":\"" + String(name) + "\",";
+  p += "\"unique_id\":\"" + uidBase() + "_" + String(objectId) + "\",";
+  p += "\"command_topic\":\"" + String(setTopic) + "\",";
+  p += "\"state_topic\":\"" + String(stateTopic) + "\",";
+  p += "\"min\":1,\"max\":10,\"step\":1,";
+  p += "\"icon\":\"mdi:fan\",";
+  p += "\"availability_topic\":\"" + String(T_STATUS) + "\",";
+  p += deviceBlockJson();
+  p += "}";
+  publishDiscoveryConfig("number", objectId, p);
+}
+
+// button: эмуляция кнопки Power (короткое / длинное нажатие)
+static void discoverPowerButton(const char* objectId, const char* name, const char* payload) {
+  String p = "{";
+  p += "\"name\":\"" + String(name) + "\",";
+  p += "\"unique_id\":\"" + uidBase() + "_" + String(objectId) + "\",";
+  p += "\"command_topic\":\"" + String(T_POWER_BUTTON_PRESS) + "\",";
+  p += "\"payload_press\":\"" + String(payload) + "\",";
+  p += "\"availability_topic\":\"" + String(T_STATUS) + "\",";
+  p += deviceBlockJson();
+  p += "}";
+  publishDiscoveryConfig("button", objectId, p);
+}
+
+// диагностика: уровень сигнала Wi-Fi
+static void discoverRssi() {
+  String p = "{";
+  p += "\"name\":\"Уровень Wi-Fi\",";
+  p += "\"unique_id\":\"" + uidBase() + "_rssi\",";
+  p += "\"state_topic\":\"" + String(T_RSSI) + "\",";
+  p += "\"unit_of_measurement\":\"dBm\",";
+  p += "\"device_class\":\"signal_strength\",";
+  p += "\"state_class\":\"measurement\",";
+  p += "\"entity_category\":\"diagnostic\",";
+  p += "\"availability_topic\":\"" + String(T_STATUS) + "\",";
+  p += deviceBlockJson();
+  p += "}";
+  publishDiscoveryConfig("sensor", "rssi", p);
+}
+
+static void publishDiscoveryAll() {
+  if (!mqtt.connected() || discoverySent) return;
+
+  discoverHddTemp();
+  discoverRpm("fan1_rpm", "Обороты кулера 1", T_FAN1_RPM_STATE);
+  discoverRpm("fan2_rpm", "Обороты кулера 2", T_FAN2_RPM_STATE);
+  discoverRpm("cpu_rpm",  "Обороты CPU кулера", T_CPU_RPM_STATE);
+  discoverServerState();
+  discoverFanPower();
+  discoverFanSpeed("fan_speed_all", "Скорость кулеров (оба)", T_FAN_SPEED_SET, T_FAN_SPEED_STATE);
+  discoverFanSpeed("fan1_speed", "Скорость кулера 1", T_FAN1_SPEED_SET, T_FAN1_SPEED_STATE);
+  discoverFanSpeed("fan2_speed", "Скорость кулера 2", T_FAN2_SPEED_SET, T_FAN2_SPEED_STATE);
+  discoverPowerButton("power_press", "Кнопка Power (1 сек)", "PRESS");
+  discoverPowerButton("power_hold",  "Кнопка Power (5 сек, force off)", "HOLD_5000");
+  discoverRssi();
+
+  discoverySent = true;
 }
 
 // ============================================================
@@ -394,6 +551,10 @@ static bool connectMqtt() {
   mqtt.subscribe(T_POWER_BUTTON_PRESS);
   Serial.println("[MQTT] Подписка на топики управления выполнена");
 
+  discoverySent = false;
+  publishDiscoveryAll();
+  Serial.println("[MQTT] Discovery-конфиги отправлены в Home Assistant");
+
   publishState();
   return true;
 }
@@ -473,7 +634,6 @@ void setup() {
   Serial.println("==================================================");
 
   // Сразу безопасно выключаем реле кулеров
-  digitalWrite(FAN_POWER_PIN, FAN_OFF_LEVEL);
   pinMode(FAN_POWER_PIN, OUTPUT);
   digitalWrite(FAN_POWER_PIN, FAN_OFF_LEVEL);
 
@@ -487,10 +647,9 @@ void setup() {
   pinMode(CPU_TACH_PIN, INPUT_PULLUP);
 
   // ШИМ кулеров
-  ledcSetup(PWM1_CHANNEL, PWM_FREQ, PWM_RESOLUTION);
-  ledcAttachPin(FAN1_PWM_PIN, PWM1_CHANNEL);
-  ledcSetup(PWM2_CHANNEL, PWM_FREQ, PWM_RESOLUTION);
-  ledcAttachPin(FAN2_PWM_PIN, PWM2_CHANNEL);
+  bool pwm1Ok = ledcAttach(FAN1_PWM_PIN, PWM_FREQ, PWM_RESOLUTION);
+  bool pwm2Ok = ledcAttach(FAN2_PWM_PIN, PWM_FREQ, PWM_RESOLUTION);
+  Serial.printf("[INIT] ledcAttach fan1=%d fan2=%d\n", pwm1Ok, pwm2Ok);
   Serial.println("[INIT] ШИМ кулеров настроен");
 
   attachInterrupt(digitalPinToInterrupt(FAN1_TACH_PIN), tach1ISR, FALLING);
